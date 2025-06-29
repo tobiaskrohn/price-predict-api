@@ -14,8 +14,8 @@ def predict():
         data['bedrooms'],
         data['bathrooms'],
         data['area'],
-	data['year_listed']
-	data['month_listed']
+	data['year_listed'],
+	data['month_listed'],
 	data['description']
     ]
     prediction = model.predict([features])[0]
