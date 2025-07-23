@@ -1,5 +1,11 @@
-flask
-scikit-learn
+Flask
 pandas
 numpy
+scikit-learn
+lightgbm
+joblib
 gunicorn
+# openpyxl # Only needed if you plan to run train_model.py on Render, not strictly for the API prediction.
+# matplotlib # Not needed for the API
+# seaborn    # Not needed for the API
+# regex      # Usually included with Python, but harmless to list if you explicitly import it.
