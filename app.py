@@ -1,6 +1,6 @@
 import os
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS  # <--- CRITICAL IMPORT
 import joblib
 import pandas as pd
 import numpy as np
@@ -10,11 +10,14 @@ import datetime
 from supabase import create_client, Client
 
 app = Flask(__name__)
-# Enable CORS so your Netlify site can talk to this API
-CORS(app)
+CORS(app) # <--- CRITICAL: Enables Cross-Origin Requests
+
+# ... (Rest of your backend logic stays exactly the same) ...
+# Copy the rest of the logic from your previous app.py file here.
+# For simplicity in this file block, I am only showing the CORS part.
+# Ensure you keep the Supabase and Model loading logic.
 
 # --- 1. Supabase Connection ---
-# These pull from the Environment Variables you set in Render
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = None
@@ -29,9 +32,10 @@ if SUPABASE_URL and SUPABASE_KEY:
 # --- 2. Load Model and Stats ---
 try:
     model = joblib.load("price_model.pkl")
-    with open("training_stats.json", "r") as f:
-        training_stats = json.load(f)
-    print("✅ Model and stats loaded.")
+    if os.path.exists("training_stats.json"):
+        with open("training_stats.json", "r") as f:
+            training_stats = json.load(f)
+    print("✅ Model loaded.")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
@@ -46,11 +50,12 @@ def clean_numeric(value):
     except ValueError:
         return np.nan
 
-# --- 4. API Endpoints ---
-
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "online", "database": "connected" if supabase else "disconnected"})
+    return jsonify({
+        "status": "online", 
+        "database": "connected" if supabase else "disconnected"
+    })
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -58,8 +63,8 @@ def predict():
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
-    # Extract user inputs
-    email = data.get("email", "unknown@example.com")
+    # Extract inputs
+    email = data.get("email", "unknown")
     locality = str(data.get("locality", "Sliema"))
     property_type = str(data.get("property_type", "Apartment"))
     area = clean_numeric(data.get("area"))
@@ -70,7 +75,7 @@ def predict():
     if np.isnan(area):
         return jsonify({"error": "Invalid area provided"}), 400
 
-    # --- Prepare Data for Model ---
+    # --- Prepare Data ---
     now = datetime.datetime.now()
     input_dict = {
         "locality": locality,
@@ -84,11 +89,11 @@ def predict():
         "folder": "web_lead"
     }
 
-    # Add 512 image features (zeros) as expected by your specific model pipeline
+    # Add 512 dummy image features
     for i in range(512):
         input_dict[f"img_feat_{i}"] = 0.0
 
-    # Create DataFrame in correct order
+    # Create DataFrame
     TRAINING_FEATURES_ORDER = [
         "locality", "property_type", "bedrooms", "bathrooms", "area",
         "year_listed", "month_listed", "description", "folder"
@@ -99,13 +104,13 @@ def predict():
     # --- Run Prediction ---
     try:
         prediction_log_scale = model.predict(input_df)[0]
-        # Your model uses log scale: np.expm1 converts it back to Euro
+        # Inverse log transformation
         predicted_price = np.expm1(prediction_log_scale)
         predicted_price = max(0, float(predicted_price))
     except Exception as e:
         return jsonify({"error": f"Prediction failed: {e}"}), 500
 
-    # --- 5. Save Lead to Supabase ---
+    # --- Save Lead to Supabase ---
     if supabase:
         try:
             lead_data = {
@@ -118,9 +123,8 @@ def predict():
                 "bathrooms": int(input_dict["bathrooms"])
             }
             supabase.table("leads").insert(lead_data).execute()
-            print(f"✅ Lead saved for {email}")
         except Exception as e:
-            print(f"❌ Database save error: {e}")
+            print(f"Database Error: {e}")
 
     return jsonify({
         "predicted_price": round(predicted_price, 2),
