@@ -1,10 +1,12 @@
 Flask
+flask-cors
 pandas
 numpy
 scikit-learn
 lightgbm
 joblib
 gunicorn
+torch
 # openpyxl # Only needed if you plan to run train_model.py on Render, not strictly for the API prediction.
 # matplotlib # Not needed for the API
 # seaborn    # Not needed for the API
