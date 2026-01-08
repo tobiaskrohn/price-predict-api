@@ -1,6 +1,6 @@
 import os
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # <--- CRITICAL IMPORT
+from flask_cors import CORS
 import joblib
 import pandas as pd
 import numpy as np
@@ -10,12 +10,8 @@ import datetime
 from supabase import create_client, Client
 
 app = Flask(__name__)
-CORS(app) # <--- CRITICAL: Enables Cross-Origin Requests
-
-# ... (Rest of your backend logic stays exactly the same) ...
-# Copy the rest of the logic from your previous app.py file here.
-# For simplicity in this file block, I am only showing the CORS part.
-# Ensure you keep the Supabase and Model loading logic.
+# Enable CORS for all routes (allows Netlify frontend to connect)
+CORS(app)
 
 # --- 1. Supabase Connection ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -31,6 +27,7 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 # --- 2. Load Model and Stats ---
 try:
+    # Load model. Scikit-learn handles the pipeline logic.
     model = joblib.load("price_model.pkl")
     if os.path.exists("training_stats.json"):
         with open("training_stats.json", "r") as f:
@@ -54,7 +51,8 @@ def clean_numeric(value):
 def health():
     return jsonify({
         "status": "online", 
-        "database": "connected" if supabase else "disconnected"
+        "database": "connected" if supabase else "disconnected",
+        "features": "engineered"
     })
 
 @app.route("/predict", methods=["POST"])
@@ -75,13 +73,19 @@ def predict():
     if np.isnan(area):
         return jsonify({"error": "Invalid area provided"}), 400
 
+    # Defaults
+    bedrooms = bedrooms if not np.isnan(bedrooms) else 2
+    bathrooms = bathrooms if not np.isnan(bathrooms) else 1
+
     # --- Prepare Data ---
     now = datetime.datetime.now()
+    
+    # Base dictionary
     input_dict = {
         "locality": locality,
         "property_type": property_type,
-        "bedrooms": bedrooms if not np.isnan(bedrooms) else 2,
-        "bathrooms": bathrooms if not np.isnan(bathrooms) else 1,
+        "bedrooms": bedrooms,
+        "bathrooms": bathrooms,
         "area": area,
         "year_listed": now.year,
         "month_listed": now.month,
@@ -89,22 +93,31 @@ def predict():
         "folder": "web_lead"
     }
 
-    # Add 512 dummy image features
+    # --- Feature Engineering (Matches Training) ---
+    # These were missing before, causing the model crash
+    input_dict['desc_length'] = len(description) if description else 0
+    input_dict['desc_word_count'] = len(description.split()) if description else 0
+    
+    safe_area = area if area > 0 else 1
+    input_dict['bedrooms_per_area'] = bedrooms / safe_area
+    input_dict['bathrooms_per_area'] = bathrooms / safe_area
+    
+    safe_beds = bedrooms if bedrooms > 0 else 1
+    input_dict['bed_bath_ratio'] = bathrooms / safe_beds
+
+    # Add 512 dummy image features (zeros)
     for i in range(512):
         input_dict[f"img_feat_{i}"] = 0.0
 
     # Create DataFrame
-    TRAINING_FEATURES_ORDER = [
-        "locality", "property_type", "bedrooms", "bathrooms", "area",
-        "year_listed", "month_listed", "description", "folder"
-    ] + [f"img_feat_{i}" for i in range(512)]
-    
-    input_df = pd.DataFrame([input_dict])[TRAINING_FEATURES_ORDER]
+    # Note: Scikit-learn pipelines are usually robust to column order if passed a DataFrame with names,
+    # but we pass the dict to DataFrame directly to let pandas handle the schema.
+    input_df = pd.DataFrame([input_dict])
 
     # --- Run Prediction ---
     try:
         prediction_log_scale = model.predict(input_df)[0]
-        # Inverse log transformation
+        # Inverse log transformation (np.expm1)
         predicted_price = np.expm1(prediction_log_scale)
         predicted_price = max(0, float(predicted_price))
     except Exception as e:
@@ -119,8 +132,8 @@ def predict():
                 "property_type": property_type,
                 "area": area,
                 "predicted_price": round(predicted_price, 2),
-                "bedrooms": int(input_dict["bedrooms"]),
-                "bathrooms": int(input_dict["bathrooms"])
+                "bedrooms": int(bedrooms),
+                "bathrooms": int(bathrooms)
             }
             supabase.table("leads").insert(lead_data).execute()
         except Exception as e:
