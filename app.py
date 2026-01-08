@@ -1,5 +1,6 @@
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import joblib
 import pandas as pd
 import numpy as np
@@ -7,6 +8,8 @@ import re
 import json
 
 app = Flask(__name__)
+# Enable CORS for all routes to allow your Netlify frontend to communicate with this API
+CORS(app)
 
 # --- Load your trained model and training statistics ---
 try:
@@ -34,108 +37,99 @@ def clean_numeric(value):
         return np.nan
     s_val = str(value)
     # Remove all non-digit, non-comma, non-period characters, then remove commas
-    cleaned = re.sub(r'[^\d.,]+', '', s_val).replace(',', '')
-    return pd.to_numeric(cleaned, errors='coerce')
+    cleaned = re.sub(r"[^\d.,]", "", s_val).replace(",", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return np.nan
 
-# Define the exact list of features used during training, INCLUDING DERIVED ONES.
-# This list MUST EXACTLY match the 'available_features' used when training your model.
-# The order is CRITICAL for the ColumnTransformer in your pipeline.
-TRAINING_FEATURES_ORDER = [
-    "locality",
-    "property_type",
-    "bedrooms",
-    "bathrooms",
-    "area",
-    "desc_length",          # Derived
-    "desc_word_count",      # Derived
-    "bedrooms_per_area",    # Derived
-    "bathrooms_per_area",   # Derived
-    "bed_bath_ratio",       # Derived
-    "description"
-]
+# -------------------------------
+# 🚀 API Endpoints
+# -------------------------------
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({"status": "active", "message": "PropIQly Price Prediction API is running."})
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    """
+    Expects a JSON payload with:
+    - locality (str)
+    - property_type (str)
+    - area (float/int)
+    - bedrooms (int)
+    - bathrooms (int)
+    - description (str)
+    """
     data = request.get_json()
 
     if not data:
         return jsonify({"error": "No input data provided"}), 400
 
-    # --- 1. Basic Data Validation: Expected fields from Bubble.io ---
-    # These are the ONLY fields you expect directly from the user/Bubble.io
-    expected_user_input_fields = [
-        "locality", "property_type", "bedrooms", "bathrooms", "area", "description"
-    ]
-    for field in expected_user_input_fields:
-        if field not in data or data[field] is None:
-            return jsonify({"error": f"Missing or null required field from user input: '{field}'"}), 400
-
-    # --- 2. Clean Numeric Inputs ---
-    # Use .get() with a default to avoid KeyError if Bubble sends unexpected None
-    # though we've validated above.
+    # --- 1. Extract and Clean Inputs ---
     try:
-        raw_area = data.get('area')
-        raw_bedrooms = data.get('bedrooms')
-        raw_bathrooms = data.get('bathrooms')
-
-        processed_area = clean_numeric(raw_area)
-        processed_bedrooms = clean_numeric(raw_bedrooms)
-        processed_bathrooms = clean_numeric(raw_bathrooms)
+        locality = str(data.get("locality", ""))
+        property_type = str(data.get("property_type", ""))
+        area = clean_numeric(data.get("area"))
+        bedrooms = clean_numeric(data.get("bedrooms"))
+        bathrooms = clean_numeric(data.get("bathrooms"))
+        description = str(data.get("description", ""))
+        
+        # Add year/month based on current time
+        import datetime
+        now = datetime.datetime.now()
+        year_listed = now.year
+        month_listed = now.month
 
     except Exception as e:
-        return jsonify({"error": f"Error cleaning numeric input '{e}'. Check format for area, bedrooms, bathrooms."}), 400
+        return jsonify({"error": f"Error parsing input data: {e}"}), 400
 
-    # --- Handle NaNs for crucial numerical inputs (post clean_numeric) ---
-    if pd.isna(processed_area) or pd.isna(processed_bedrooms) or pd.isna(processed_bathrooms):
-         return jsonify({"error": "Invalid numeric input detected (e.g., area, bedrooms, bathrooms could not be parsed). Please check values."}), 400
+    # --- 2. Basic Validation ---
+    if not locality or not property_type or np.isnan(area):
+        return jsonify({"error": "Missing or invalid required fields: locality, property_type, and area are mandatory."}), 400
 
-    # --- 3. Ensure positive values for 'area' ---
-    if processed_area <= 0:
-        return jsonify({"error": "Area must be a positive value."}), 400
+    # --- 3. Outlier Check (Using training_stats) ---
+    # Optional: Log warning if area is outside training bounds
+    if area < training_stats.get("area_lower_bound", 0) or area > training_stats.get("area_upper_bound", 10000):
+        print(f"Warning: Area {area} is outside typical training bounds.")
 
-    # --- 4. Apply Outlier Capping for 'area' using training statistics ---
-    area_lower_bound = training_stats.get('area_lower_bound')
-    area_upper_bound = training_stats.get('area_upper_bound')
+    # --- 4. Handle Missing numeric specs (fill with training medians or sensible defaults) ---
+    # For bedrooms/bathrooms, if NaN, we could use defaults or leave for model to handle (if trained on NaNs)
+    # Here, we'll use simple defaults if cleaning failed
+    bedrooms = bedrooms if not np.isnan(bedrooms) else 2
+    bathrooms = bathrooms if not np.isnan(bathrooms) else 1
 
-    if area_lower_bound is None or area_upper_bound is None:
-        return jsonify({"error": "Training statistics (area bounds) not loaded correctly."}), 500
-
-    processed_area_capped = np.clip(processed_area, area_lower_bound, area_upper_bound)
-
-
-    # --- 5. Feature Engineering (Calculate derived features from user input) ---
-    # These calculations must match EXACTLY what was done during training
-    description_text = data.get('description', '') # Safe default if description is empty/None for some reason
-
-    desc_length = len(description_text)
-    desc_word_count = len(description_text.split())
-
-    # Use capped area for derived features to maintain consistency
-    bedrooms_per_area = processed_bedrooms / (processed_area_capped + 1e-6)
-    bathrooms_per_area = processed_bathrooms / (processed_area_capped + 1e-6)
-    bed_bath_ratio = processed_bedrooms / (processed_bathrooms + 1e-6)
-
-
-    # --- 6. Construct the FINAL input dictionary for the model ---
-    # This dictionary must contain ALL features the model expects, both raw and derived.
+    # --- 5. Prepare data for model ---
+    # Create the dictionary in the order expected by the model
+    # Note: 'folder' and 'img_feat_X' are required because the Excel pipeline used them.
+    # We use neutral/placeholder values for these.
     input_for_model = {
-        "locality": data.get('locality'),
-        "property_type": data.get('property_type'),
-        "bedrooms": processed_bedrooms, # Use the cleaned/processed value
-        "bathrooms": processed_bathrooms, # Use the cleaned/processed value
-        "area": processed_area_capped, # Use the capped value
-        "desc_length": desc_length,
-        "desc_word_count": desc_word_count,
-        "bedrooms_per_area": bedrooms_per_area,
-        "bathrooms_per_area": bathrooms_per_area,
-        "bed_bath_ratio": bed_bath_ratio,
-        "description": description_text
+        "locality": locality,
+        "property_type": property_type,
+        "bedrooms": bedrooms,
+        "bathrooms": bathrooms,
+        "area": area,
+        "year_listed": year_listed,
+        "month_listed": month_listed,
+        "description": description,
+        "folder": "api_request" # Placeholder for the folder column
     }
 
-    # --- 7. Create DataFrame ensuring correct column order ---
-    # This is CRITICAL. The ColumnTransformer relies on this order if it's not by name.
-    # By specifying TRAINING_FEATURES_ORDER, we ensure consistency.
+    # Add 512 zero-value image features (neutral embeddings)
+    for i in range(512):
+        input_for_model[f"img_feat_{i}"] = 0.0
+
+    # --- 6. Define Feature Order ---
+    # This MUST match the order used in your pipeline's ColumnTransformer
+    TRAINING_FEATURES_ORDER = [
+        "locality", "property_type", "bedrooms", "bathrooms", "area",
+        "year_listed", "month_listed", "description", "folder"
+    ] + [f"img_feat_{i}" for i in range(512)]
+
+    # --- 7. Create DataFrame ---
     try:
+        # Create DataFrame from the dict, ensuring column order is correct
         input_df = pd.DataFrame([input_for_model])[TRAINING_FEATURES_ORDER]
     except KeyError as e:
         # This error means 'input_for_model' dictionary is missing a key expected by TRAINING_FEATURES_ORDER
@@ -146,19 +140,25 @@ def predict():
     # --- 8. Predict and Inverse Transform ---
     # The loaded model (pipeline) automatically handles StandardScaler, OneHotEncoder, TfidfVectorizer
     try:
-        prediction_log_scale = model.predict(input_df)[0]
-        # Apply inverse log transformation to get the price in original scale
-        predicted_price = np.expm1(prediction_log_scale)
-        # Ensure price is non-negative, as expm1 can sometimes return tiny negative floats
-        predicted_price = max(0, predicted_price)
+        # Note: If your training used Log transformation on Price, we need to expm1 it.
+        # Looking at common practices in these models:
+        prediction_val = model.predict(input_df)[0]
+        
+        # Check if the model predicts log(price) or raw price. 
+        # Usually, if MAE/RMSE were very small during training, it's log.
+        # We will assume raw price for now, or you can wrap it in np.expm1 if needed.
+        predicted_price = float(prediction_val)
+        
     except Exception as e:
         return jsonify({"error": f"Prediction failed: {e}. Check input values and model integrity."}), 500
 
     # --- 9. Return Prediction ---
-    return jsonify({"predicted_price": round(predicted_price, 2)}) # Round for cleaner output
+    return jsonify({
+        "predicted_price": round(predicted_price, 2),
+        "currency": "EUR"
+    }) 
 
 if __name__ == "__main__":
     # Ensure 'price_model.pkl' and 'training_stats.json' are in the same directory
-    # For production deployment, use a WSGI server like Gunicorn or uWSGI.
-    # Example for local development:
-    app.run(host='0.0.0.0', port=5000, debug=True) # debug=True is for dev only
+    # For production deployment, use a WSGI server like Gunicorn.
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
