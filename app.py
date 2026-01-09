@@ -54,6 +54,8 @@ async def predict_price(data: PropertyData, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail="Model not loaded on server.")
 
     # A. Prepare Data for Model
+    # IMPORTANT: We add 'price_per_sqm' because the training pipeline 
+    # included it as a derived feature. We set it to 0 as a placeholder.
     input_data = {
         "locality": [data.locality],
         "property_type": [data.property_type],
@@ -63,10 +65,11 @@ async def predict_price(data: PropertyData, background_tasks: BackgroundTasks):
         "year_listed": [datetime.now().year],
         "month_listed": [datetime.now().month],
         "description": [data.description],
+        "price_per_sqm": [0.0], 
         "folder": ["web_request"]
     }
     
-    # Add dummy image features
+    # Add dummy image features (512 dimensions)
     for i in range(512):
         input_data[f"img_feat_{i}"] = [0.0]
 
@@ -74,15 +77,16 @@ async def predict_price(data: PropertyData, background_tasks: BackgroundTasks):
 
     # B. Run Prediction & ROUNDING
     try:
+        # Generate the raw prediction from the model
         raw_prediction = model.predict(df)[0]
         
-        # ADJUSTMENT MADE HERE: 
-        # round(x, -3) rounds to the nearest 1,000 (e.g., 345,600 -> 346,000)
+        # Round to the nearest thousand (e.g., 345,600 -> 346,000)
         predicted_price = float(round(raw_prediction, -3))
         
     except Exception as e:
         print(f"Prediction Error: {e}")
-        raise HTTPException(status_code=400, detail="Internal prediction error.")
+        # If the error persists, it usually means a column name mismatch
+        raise HTTPException(status_code=400, detail=f"Prediction error: {str(e)}")
 
     # C. Background Tasks (using the rounded price)
     background_tasks.add_task(
