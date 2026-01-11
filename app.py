@@ -94,7 +94,7 @@ def predict():
                 </div>
                 <div style="background-color: #f8fafc; padding: 30px; border-radius: 20px; text-align: center;">
                     <p style="text-transform: uppercase; font-size: 10px; font-weight: bold; color: #94a3b8; letter-spacing: 2px; margin-bottom: 10px;">Market Estimate</p>
-                    <h2 style="font-size: 48px; color: #4f46e5; margin: 0; font-weight: 900;">€{predicted_price:,.0f}</h2>
+                    <h2 style="font-size: 48px; color: #4f46e5; margin: 0; font-weight: 600;">€{predicted_price:,.0f}</h2>
                     <p style="color: #64748b; font-size: 14px; margin-top: 15px;">Locality: <b>{locality}</b> | Type: <b>{property_type}</b></p>
                 </div>
                 <div style="margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px; text-align: center; color: #94a3b8; font-size: 12px;">
@@ -121,5 +121,6 @@ def predict():
 if __name__ == "__main__":
 
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+
 
 
