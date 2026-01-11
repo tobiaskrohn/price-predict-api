@@ -7,7 +7,7 @@ import numpy as np
 import re
 import json
 import datetime
-import resend  # Added Resend library
+import resend 
 from supabase import create_client, Client
 
 app = Flask(__name__)
@@ -16,7 +16,7 @@ CORS(app)
 # --- 1. Connections ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY") # Add this to Render Env Vars
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
 resend.api_key = RESEND_API_KEY
 supabase: Client = None
@@ -39,66 +39,81 @@ def clean_numeric(value):
     if pd.isna(value) or value is None:
         return np.nan
     s_val = str(value)
-    cleaned = re.sub(r"[^\d.,]", "", s_val).replace(",", "")
+    cleaned = re.sub(r"[^\d.,]", "", s_val)
+    if not cleaned:
+        return np.nan
+    cleaned = cleaned.replace(",", "")
     try:
         return float(cleaned)
-    except ValueError:
+    except:
         return np.nan
 
-@app.route("/", methods=["GET"])
+@app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "online", "model_loaded": model is not None})
+    return jsonify({"status": "online", "model_loaded": model is not None}), 200
 
-@app.route("/predict", methods=["POST"])
+@app.route('/predict', methods=['POST'])
 def predict():
-    if model is None:
+    if not model:
         return jsonify({"error": "Model not loaded on server"}), 500
 
     data = request.get_json()
-    email_to = data.get("email", "unknown")
-    locality = str(data.get("locality", "Sliema"))
-    property_type = str(data.get("property_type", "Apartment"))
-    area = clean_numeric(data.get("area"))
-    bedrooms = clean_numeric(data.get("bedrooms"))
-    bathrooms = clean_numeric(data.get("bathrooms"))
-    description = str(data.get("description", ""))
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
 
-    if np.isnan(area):
-        return jsonify({"error": "Invalid area"}), 400
+    # Extract new fields alongside existing ones
+    email_to = data.get('email')
+    locality = data.get('locality', 'Sliema')
+    property_type = data.get('property_type', 'Apartment')
+    area = clean_numeric(data.get('area', 100))
+    bedrooms = clean_numeric(data.get('bedrooms', 2))
+    bathrooms = clean_numeric(data.get('bathrooms', 2))
+    
+    # New Fields
+    is_owner = data.get('is_owner', True) # Boolean
+    description = data.get('description', '') # String
 
-    # Prediction Logic
+    if not email_to:
+        return jsonify({"error": "Email is required"}), 400
+
+    # Prepare features for ML Model
     input_dict = {
-        "locality": locality, "property_type": property_type,
-        "bedrooms": bedrooms, "bathrooms": bathrooms, "area": area,
-        "year_listed": datetime.datetime.now().year,
-        "month_listed": datetime.datetime.now().month,
-        "description": description, "folder": "web_lead", "price_per_sqm": 0.0
+        'locality': locality,
+        'property_type': property_type,
+        'area': area,
+        'bedrooms': bedrooms,
+        'bathrooms': bathrooms,
     }
-    input_dict['desc_length'] = len(description)
-    input_dict['desc_word_count'] = len(description.split())
-    input_dict['bedrooms_per_area'] = bedrooms / (area if area > 0 else 1)
-    input_dict['bathrooms_per_area'] = bathrooms / (area if area > 0 else 1)
-    input_dict['bed_bath_ratio'] = bathrooms / (bedrooms if bedrooms > 0 else 1)
-    for i in range(512): input_dict[f"img_feat_{i}"] = 0.0
+
+    # Derived feature for model
+    safe_beds = bedrooms if bedrooms > 0 else 1
+    input_dict['bed_bath_ratio'] = bathrooms / safe_beds
+
+    # Add dummy image features if model expects them
+    for i in range(512):
+        input_dict[f"img_feat_{i}"] = 0.0
+
+    input_df = pd.DataFrame([input_dict])
 
     try:
-        prediction_log_scale = model.predict(pd.DataFrame([input_dict]))[0]
-        predicted_price = float(round(max(0, np.expm1(prediction_log_scale)), -3))
+        prediction_log_scale = model.predict(input_df)[0]
+        raw_price = np.expm1(prediction_log_scale)
+        predicted_price = float(round(max(0, raw_price), -3))
         
-        # --- Send Email via Resend ---
+        # --- Email Alert via Resend ---
         if RESEND_API_KEY:
             html_content = f"""
-            <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 40px; border: 1px solid #eee; border-radius: 24px;">
-                <div style="text-align: center; margin-bottom: 30px;">
-                    <h1 style="color: #4f46e5; font-size: 28px; font-weight: 900; letter-spacing: -1px;">PropIQly<span style="color: #4f46e5;">.</span></h1>
-                </div>
-                <div style="background-color: #f8fafc; padding: 30px; border-radius: 20px; text-align: center;">
+            <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #f1f5f9; border-radius: 24px; padding: 40px;">
+                <h1 style="color: #0f172a; font-size: 24px; font-weight: 900; margin-bottom: 8px;">Valuation Ready</h1>
+                <p style="color: #64748b; margin-bottom: 30px;">Based on our AI analysis, here is the market estimate for your property.</p>
+                <div style="background: #f8fafc; border-radius: 20px; padding: 30px; text-align: center;">
                     <p style="text-transform: uppercase; font-size: 10px; font-weight: bold; color: #94a3b8; letter-spacing: 2px; margin-bottom: 10px;">Market Estimate</p>
                     <h2 style="font-size: 48px; color: #4f46e5; margin: 0; font-weight: 900;">€{predicted_price:,.0f}</h2>
                     <p style="color: #64748b; font-size: 14px; margin-top: 15px;">Locality: <b>{locality}</b> | Type: <b>{property_type}</b></p>
+                    <p style="color: #94a3b8; font-size: 12px; margin-top: 5px;">Inquiry Type: <b>{"Property Owner" if is_owner else "Listing Sense Check"}</b></p>
                 </div>
                 <div style="margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px; text-align: center; color: #94a3b8; font-size: 12px;">
-                    This estimate is powered by PropIQly AI. For a detailed human inspection, please contact our experts.
+                    This estimate is powered by PropIQly AI.
                 </div>
             </div>
             """
@@ -109,14 +124,25 @@ def predict():
                 "html": html_content
             })
 
-        # Save to DB
+        # --- Save to Supabase (Updated with new fields) ---
         if supabase:
-            supabase.table("leads").insert({"email": email_to, "locality": locality, "predicted_price": predicted_price}).execute()
+            supabase.table("leads").insert({
+                "email": email_to, 
+                "locality": locality, 
+                "property_type": property_type,
+                "area": area,
+                "bedrooms": int(bedrooms),
+                "bathrooms": int(bathrooms),
+                "predicted_price": predicted_price,
+                "is_owner": is_owner,      # Ensure this column exists in DB
+                "description": description # Ensure this column exists in DB
+            }).execute()
 
-        return jsonify({"status": "success"}) # Don't return price to frontend
+        return jsonify({"predicted_price": predicted_price}), 200
 
     except Exception as e:
+        print(f"Prediction/Storage Error: {e}")
         return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
