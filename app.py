@@ -6,7 +6,6 @@ import pandas as pd
 import numpy as np
 import re
 import json
-import datetime
 import resend 
 from supabase import create_client, Client
 
@@ -35,73 +34,59 @@ try:
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
-def clean_numeric(value):
-    if pd.isna(value) or value is None:
-        return np.nan
-    s_val = str(value)
-    cleaned = re.sub(r"[^\d.,]", "", s_val)
-    if not cleaned:
-        return np.nan
-    cleaned = cleaned.replace(",", "")
-    try:
-        return float(cleaned)
-    except:
-        return np.nan
-
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "online"}), 200
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if not model:
-        return jsonify({"error": "Model not loaded"}), 500
-
-    data = request.get_json()
-    
-    # --- DATA EXTRACTION (Fixing Nulls) ---
-    # We use data.get() for every field to ensure we capture what the frontend sends.
-    # Note: Frontend sends 'email' (not email_to), so we map it here.
-    email_to = data.get('email') 
-    locality = data.get('locality')
-    prop_type = data.get('property_type')
-    
-    # Clean numeric fields (handle strings like "2" or "100")
-    area = clean_numeric(data.get('area'))
-    bedrooms = clean_numeric(data.get('bedrooms'))
-    bathrooms = clean_numeric(data.get('bathrooms'))
-    
-    # New fields
-    is_owner = data.get('is_owner', False) # Default to False if missing
-    description = data.get('description', '')
-
-    # --- Model Input Preparation ---
-    input_dict = {
-        'locality': locality,
-        'property_type': prop_type,
-        'area': area,
-        'bedrooms': bedrooms,
-        'bathrooms': bathrooms,
-    }
-    
-    safe_beds = bedrooms if bedrooms > 0 else 1
-    input_dict['bed_bath_ratio'] = bathrooms / safe_beds
-    for i in range(512): input_dict[f"img_feat_{i}"] = 0.0
-
     try:
-        input_df = pd.DataFrame([input_dict])
-        pred_log = model.predict(input_df)[0]
-        predicted_price = float(round(max(0, np.expm1(pred_log)), -3))
+        data = request.json
+        email_to = data.get('email')
+        locality = data.get('locality')
+        property_type = data.get('property_type')
+        area = float(data.get('area', 0))
+        bedrooms = float(data.get('bedrooms', 0))
+        bathrooms = float(data.get('bathrooms', 0))
+        is_owner = data.get('is_owner', True)
+        description = data.get('description', "")
 
-        # --- 1. Send Email ---
-        if RESEND_API_KEY and email_to:
+        # --- 3. Feature Engineering (Crucial for your model) ---
+        desc_text = str(description) if description else ""
+        
+        input_dict = {
+            'locality': locality,
+            'property_type': property_type,
+            'area': area,
+            'bedrooms': bedrooms,
+            'bathrooms': bathrooms,
+            'description': desc_text,
+            'desc_length': len(desc_text),
+            'desc_word_count': len(desc_text.split()),
+            'bedrooms_per_area': bedrooms / area if area > 0 else 0,
+            'bathrooms_per_area': bathrooms / area if area > 0 else 0
+        }
+
+        # Add dummy image features if your model expects them (512 features)
+        for i in range(512):
+            input_dict[f"img_feat_{i}"] = 0.0
+
+        # Create DataFrame
+        input_df = pd.DataFrame([input_dict])
+
+        # --- 4. Prediction ---
+        prediction_log = model.predict(input_df)[0]
+        predicted_price = float(round(np.expm1(prediction_log), -3))
+
+        # --- 5. Send Email ---
+        if RESEND_API_KEY:
             html_content = f"""
-            <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
+            <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
                 <h1 style="color: #4f46e5;">PropIQly Valuation</h1>
                 <p>Your property estimate is ready:</p>
                 <div style="background: #f8fafc; padding: 30px; border-radius: 20px; text-align: center; border: 1px solid #e2e8f0;">
                     <h2 style="font-size: 48px; color: #4f46e5; margin: 0;">€{predicted_price:,.0f}</h2>
-                    <p style="color: #64748b;">{prop_type} in {locality}</p>
+                    <p style="color: #64748b;">{property_type} in {locality}</p>
                 </div>
             </div>
             """
@@ -112,27 +97,25 @@ def predict():
                 "html": html_content
             })
 
-        # --- 2. Save to Supabase (Explicit Mapping) ---
+        # --- 6. Save Lead ---
         if supabase:
-            # We explicitly cast to ensure Postgres accepts the values
-            db_record = {
+            supabase.table("leads").insert({
                 "email": email_to, 
                 "locality": locality, 
-                "property_type": prop_type,
-                "area": area, 
-                "bedrooms": int(bedrooms) if not np.isnan(bedrooms) else 0,
-                "bathrooms": int(bathrooms) if not np.isnan(bathrooms) else 0,
+                "property_type": property_type,
+                "area": area,
+                "bedrooms": int(bedrooms),
+                "bathrooms": int(bathrooms),
                 "predicted_price": predicted_price,
-                "is_owner": bool(is_owner),      
-                "description": str(description)
-            }
-            supabase.table("leads").insert(db_record).execute()
+                "is_owner": is_owner,
+                "description": description
+            }).execute()
 
         return jsonify({"predicted_price": predicted_price}), 200
 
     except Exception as e:
-        print(f"Prediction Error: {e}")
+        print(f"Prediction error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(host='0.0.0.0', port=5000)
