@@ -59,27 +59,28 @@ def predict():
 
     data = request.get_json()
     
-    # Consistent mapping to your original DB structure
-    email = data.get('email')
+    # REVERTED: Using your original 'email_to' key to ensure compatibility
+    email_to = data.get('email_to')
     locality = data.get('locality')
-    prop_type = data.get('property_type')
+    property_type = data.get('property_type')
     area = clean_numeric(data.get('area'))
     bedrooms = clean_numeric(data.get('bedrooms'))
     bathrooms = clean_numeric(data.get('bathrooms'))
     
-    # New requested fields
+    # NEW FIELDS:
     is_owner = data.get('is_owner', True)
     description = data.get('description', '')
 
-    # Prepare for model
+    # Model Input (Keep exact as training requires)
     input_dict = {
         'locality': locality,
-        'property_type': prop_type,
+        'property_type': property_type,
         'area': area,
         'bedrooms': bedrooms,
         'bathrooms': bathrooms,
     }
     
+    # Feature engineering for the specific model you have
     safe_beds = bedrooms if bedrooms > 0 else 1
     input_dict['bed_bath_ratio'] = bathrooms / safe_beds
     for i in range(512): input_dict[f"img_feat_{i}"] = 0.0
@@ -90,21 +91,31 @@ def predict():
         pred_log = model.predict(input_df)[0]
         predicted_price = float(round(max(0, np.expm1(pred_log)), -3))
 
-        # 1. Send Email
-        if RESEND_API_KEY and email:
+        # 1. Send Email (Your original professional HTML)
+        if RESEND_API_KEY and email_to:
+            html_content = f"""
+            <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
+                <h1 style="color: #4f46e5;">PropIQly Valuation</h1>
+                <p>Your property estimate is ready:</p>
+                <div style="background: #f8fafc; padding: 30px; border-radius: 20px; text-align: center; border: 1px solid #e2e8f0;">
+                    <h2 style="font-size: 48px; color: #4f46e5; margin: 0;">€{predicted_price:,.0f}</h2>
+                    <p style="color: #64748b;">{property_type} in {locality}</p>
+                </div>
+            </div>
+            """
             resend.Emails.send({
                 "from": "PropIQly <no-reply@propiqly.com>",
-                "to": email,
-                "subject": "Your Property Valuation",
-                "html": f"<h1>Estimate: €{predicted_price:,.0f}</h1><p>Type: {prop_type} in {locality}</p>"
+                "to": email_to,
+                "subject": "Your Property Valuation Result",
+                "html": html_content
             })
 
-        # 2. Save to Supabase (Fixed mapping to prevent Nulls)
+        # 2. Save to DB (Matches your original column names + new ones)
         if supabase:
             supabase.table("leads").insert({
-                "email": email, 
+                "email": email_to, 
                 "locality": locality, 
-                "property_type": prop_type,
+                "property_type": property_type,
                 "area": area,
                 "bedrooms": int(bedrooms),
                 "bathrooms": int(bathrooms),
@@ -116,6 +127,7 @@ def predict():
         return jsonify({"predicted_price": predicted_price}), 200
 
     except Exception as e:
+        print(f"Prediction Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
