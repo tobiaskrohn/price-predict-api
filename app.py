@@ -111,7 +111,7 @@ def predict():
 
         # Save to DB
         if supabase:
-            supabase.table("leads").insert({"email": email_to, "locality": locality, "predicted_price": predicted_price, "property_type": property_type, "area": area, "bedrooms": int(bedrooms)}).execute()
+            supabase.table("leads").insert({"email": email_to, "locality": locality, "predicted_price": predicted_price, "property_type": property_type, "area": area, "bedrooms": int(bedrooms), "bathrooms": int(bathrooms), "description": description }).execute()
 
         return jsonify({"status": "success"}) # Don't return price to frontend
 
@@ -121,4 +121,5 @@ def predict():
 if __name__ == "__main__":
 
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+
 
