@@ -62,7 +62,7 @@ def predict():
     bedrooms = clean_numeric(data.get("bedrooms"))
     bathrooms = clean_numeric(data.get("bathrooms"))
     description = str(data.get("description", ""))
-
+    is_owner = data.get('is_owner', True)
     if np.isnan(area):
         return jsonify({"error": "Invalid area"}), 400
 
@@ -111,7 +111,7 @@ def predict():
 
         # Save to DB
         if supabase:
-            supabase.table("leads").insert({"email": email_to, "locality": locality, "predicted_price": predicted_price, "property_type": property_type, "area": area, "bedrooms": int(bedrooms), "bathrooms": int(bathrooms), "description": description }).execute()
+            supabase.table("leads").insert({"email": email_to, "locality": locality, "predicted_price": predicted_price, "property_type": property_type, "area": area, "bedrooms": int(bedrooms), "bathrooms": int(bathrooms), "description": description, "is_owner": is_owner}).execute()
 
         return jsonify({"status": "success"}) # Don't return price to frontend
 
